@@ -5,7 +5,7 @@ import asyncio.streams
 from petlib.ec import EcPt, EcGroup
 from petlib.bn import Bn
 from petlib.pack import encode, decode
-import pickle
+import time
 
 from hashlib import sha256
 from binascii import hexlify
@@ -15,6 +15,8 @@ import encdec
 from ast import literal_eval
 
 loop = asyncio.get_event_loop()
+
+peopleTestList = {'John':21, 'Nasos':22, 'Andreas':14, 'Tom':12, 'Anna':40, 'Maria':10}
 
 class MyServer:
 
@@ -30,7 +32,7 @@ class MyServer:
         self.clients[task] = (client_reader, client_writer)
 
         def client_done(task):
-            print("client task done:", task, file=sys.stderr)
+            #print("client task done:", task, file=sys.stderr)
             del self.clients[task]
 
         task.add_done_callback(client_done)
@@ -38,11 +40,14 @@ class MyServer:
     @asyncio.coroutine
     def _handle_client(self, client_reader, client_writer):
 
+        global paramsReceived
+
         while True:
             try:  # data = (yield from client_reader.readline()).decode("utf-8")
+                startWait = time.time()
                 data = yield from client_reader.readuntil(separator=b'fireintheboof')
-                """print("this is the data")
-                print(data[4:-13])"""
+                endWait = time.time()
+                print('IO wait: ', data[0:4], endWait - startWait)
                 cmd = data[0:4]
                 strippedData = data[4:-13]
             except asyncio.streams.IncompleteReadError:
@@ -76,89 +81,76 @@ class MyServer:
                 user_commit = encdec.decode(literal_eval(args[0]))
                 msg_to_user = BL_idp_prep(LT_idp_state, user_commit)
             elif cmd == b'para':
-                """G = decode(literal_eval(args[0]))
-                q = decode(literal_eval(args[1]))
-                g = decode(literal_eval(args[2]))
-                h = decode(literal_eval(args[3]))
-                z = decode(literal_eval(args[4]))
-                hs = decode(literal_eval(args[5]))"""
-                reader_sp, writer_sp = yield from asyncio.streams.open_connection("localhost", 12345, loop=loop)
-                listParams = []
-                print(data)
-                encParams = pickle.loads(strippedData)
-                for x in encParams:
-                    listParams.append(decode(x))
+                #reader_sp, writer_sp = yield from asyncio.streams.open_connection("localhost", 12345, loop=loop)
+                start = time.time()
+                paramsReceived = True
+                print('Starting...')
 
-
-                params = tuple(listParams)
-                print(params)
+                params = decode(strippedData)
+                G, q, g, h, z, hs = params
                 LT_idp_state, idp_pub = BL_idp_keys(params)
-                print('IDBPUB type: ', type(idp_pub[0]))
 
-                #send public key to user
-                enc_idp_pub = []
-                for x in idp_pub:
-                    enc_idp_pub.append(encode(x))
 
-                seri_enc_idp_pub = pickle.dumps(enc_idp_pub)
-                client_writer.write(b'mypb' + seri_enc_idp_pub + b'fireinthepub')
-                writer_sp.write(b'ipub' + seri_enc_idp_pub + b'fireintheboof')
+                #send public key to user and service provider
+
+                #writer_sp.write(b'ipub' + encode(idp_pub) + b'fireintheboof')
+                client_writer.write(b'mypb' + encode(idp_pub) + b'fireinthepub')
+
 
             elif cmd == b'ucmt':
-                encUserCommit = pickle.loads(strippedData)
-                Luser_commit = []
+                user_commit, C, c, responses, L2, Age = decode(strippedData)
+                rR, rx = responses
 
-                for x in encUserCommit:
-                    Luser_commit.append(decode(x))
 
-                user_commit = tuple(Luser_commit)
+
+                H = G.hash_to_point(b'service_name')
+                ID = L2 * H
+
+                Cprime = C - Age * hs[2]
+
+                Wprime = rR * hs[0] + rx * hs[1] + c * Cprime
+
+                Wxprime = rx * H + c * ID
+
+                stuffToHash = (Wprime, Wxprime, C, g, h, z, hs[0], hs[1], hs[2], hs[3], H)
+                cstr = b",".join([hexlify(x.export()) for x in stuffToHash])
+                chash = sha256(cstr).digest()
+                cprime = Bn.from_binary(chash)
+
+                if c == cprime:
+                    print("success")
+                else:
+                    print("no")
+
+
+
+
 
                 #generate message to user
                 msg_to_user = BL_idp_prep(LT_idp_state, user_commit)
-                print("msgtosuyser", msg_to_user)
-                enc_msg_to_user = []
-                for x in msg_to_user:
-                    enc_msg_to_user.append(encode(x))
 
-                seri_msg_to_user = pickle.dumps(enc_msg_to_user)
-                client_writer.write(seri_msg_to_user + b'fireintheboof')
-                print('hey')
+                client_writer.write(encode(msg_to_user) + b'fireintheboof')
 
             elif cmd == b'prep':
                 msg_to_user2 = BL_idp_validation(LT_idp_state)
-                print('MSG2', msg_to_user2)
-                enc_msg_to_user2 = []
-                for x in msg_to_user2:
-                    enc_msg_to_user2.append(encode(x))
 
-                seri_msg_to_user2 = pickle.dumps(enc_msg_to_user2)
-                client_writer.write(seri_msg_to_user2 + b'fireintheboof')
+                client_writer.write(encode(msg_to_user2) + b'fireintheboof')
 
             elif cmd == b'msgi':
-                enc_msg_to_idp = pickle.loads(strippedData)
-                msg_to_idp = decode(enc_msg_to_idp)
+                msg_to_idp = decode(strippedData)
 
                 # generate 3rd message to user
                 msg_to_user3 = BL_idp_validation_2(LT_idp_state, msg_to_idp)
-                print('MSG2', msg_to_user3)
-                enc_msg_to_user3 = []
-                for x in msg_to_user3:
-                    enc_msg_to_user3.append(encode(x))
 
-                seri_msg_to_user3 = pickle.dumps(enc_msg_to_user3)
-                client_writer.write(seri_msg_to_user3 + b'fireintheboof')
+                client_writer.write(encode(msg_to_user3) + b'fireintheboof')
 
+                end = time.time()
+                finalTime = end - start
+                print('Total time taken: ', finalTime)
 
-            elif cmd == 'repeat':
-                times = int(args[0])
-                msg = args[1]
-                client_writer.write("begin\n".encode("utf-8"))
-                for idx in range(times):
-                    client_writer.write("{}. {}\n".format(idx+1, msg)
-                                        .encode("utf-8"))
-                client_writer.write("end\n".encode("utf-8"))
             else:
-                print("Bad command {!r}".format(data), file=sys.stderr)
+                #print("Bad command {!r}".format(data), file=sys.stderr)
+                pass
 
             # This enables us to have flow control in our connection.
             yield from client_writer.drain()
@@ -294,9 +286,14 @@ def BL_idp_validation_2(idp_state, msg_from_user):
     return msg_to_user
 
 
+
+
 def main():
     loop = asyncio.get_event_loop()
     future = asyncio.Future()
+
+    global paramsReceived
+    paramsReceived = False
 
     server = MyServer()
     server.start(loop)

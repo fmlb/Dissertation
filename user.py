@@ -1,11 +1,14 @@
 import asyncio
 import asyncio.streams
 import sys
+import subprocess
 import petlib
 from os import urandom
 from petlib.cipher import Cipher
 import pickle
 from ast import literal_eval
+
+from petlib.hmac import Hmac
 
 from petlib.ec import EcGroup
 from petlib.ec import EcPt
@@ -22,74 +25,7 @@ from genzkp import *
 
 loop = asyncio.get_event_loop()
 
-"""#for encryption
-def keyGen():
 
-    key = urandom(16)
-    #keyEscaped = literal_eval(repr(key).replace(~~~))
-    #Sometimes I get an EOL while scanning strin literal error, will need to escape charactesr
-
-    return key
-
-#for encryption
-def encrypt_AES(key, msg):
-
-    plaintext = msg.encode("utf-8")
-    aes = Cipher("aes-128-gcm")
-    iv = urandom(16)
-    ciphertext, tag = aes.quick_gcm_enc(key, iv, plaintext)
-    print(type(iv), iv, "\n")
-    print(type(ciphertext), ciphertext, "\n")
-    print(type(tag), tag, "\n")
-
-    return (iv, ciphertext, tag)
-
-
-def setup():
-    G = EcGroup(nid=713)
-    g = G.hash_to_point(b"g")
-    hs = [G.hash_to_point(("h%s" % i).encode("utf8")) for i in range(4)]
-    o = G.order()
-    return (G, g, hs, o)
-
-def proveCommitment(params, C, r, secrets):
-    (G, g, (h0, h1, h2, h3), o) = params
-    x0, x1, x2, x3 = secrets
-
-    #generate random values
-    w0 = o.random()
-    w1 = o.random()
-    w2 = o.random()
-    w3 = o.random()
-    wr = o.random()
-
-    #compute W
-    wBig = w0 * h0 + w1 * h1 + w2 * h2 + w3 * h3 + wr * g
-
-
-    #compute challenge c
-    stuffToHash = (g, h0, h1, h2, h3, wBig)
-    cstr = b",".join([hexlify(x.export()) for x in stuffToHash])
-    chash = sha256(cstr).digest()
-    c = Bn.from_binary(chash)
-
-    #compute responses
-    r0 = w0 - c*x0
-    r1 = w1 - c*x1
-    r2 = w2 - c*x2
-    r3 = w3 - c*x3
-    rr = wr - c*r
-
-    responses = (r0, r1, r2, r3, rr)
-
-    #convert this proof into something we can send over the socket:
-    newResponses = []
-    for res in responses:
-        newResponses.append(Bn.hex(res))
-
-    newc = Bn.hex(c)
-
-    return (newc, newResponses)"""
 
 class StateHolder(object):
     pass
@@ -101,7 +37,7 @@ def BL_setup(Gid = 713):
     g = G.hash_to_point(b"g")
     h = G.hash_to_point(b"h")
     z = G.hash_to_point(b"z")
-    hs = [G.hash_to_point(("h%s" % i).encode("utf-8")) for i in range(100)]#what is this
+    hs = [G.hash_to_point(("h%s" % i).encode("utf-8")) for i in range(4)]#what is this
 
     return (G, q, g, h, z, hs)
 
@@ -156,7 +92,6 @@ def BL_user_validation(user_state, idp_pub, msg_to_user, message=b''):
     assert G.check_point(a2p)
 
     t1,t2,t3,t4,t5 = [q.random() for _ in range(5)]
-    print(type(a), type(t1), type(g), type(t2), type(y))
     alph = a + t1 * g + t2 * y
     alph1 = user_state.gam * a1p + t3 * g + t4 * user_state.zet1
     alph2 = user_state.gam * a2p + t5 * h + t4 * user_state.zet2
@@ -240,7 +175,7 @@ def BL_show_zk_proof(params, num_attrib):
         Cnew = Cnew + attr * gam_hs[1+i]
 
     zk.add_proof(zet1, Cnew)
-    return zk #we need to send this to the SP
+    return zk#we need to send this to the SP
 
 def BL_user_prove_cred(user_state):
     (G, q, g, h, z, hs) = user_state.params
@@ -262,7 +197,7 @@ def BL_user_prove_cred(user_state):
     env.hs = hs[:len(user_state.attributes) + 1]
 
     # The stored generators
-    env.gamg = user_state.gam * g
+    env.gamg = gam_g = user_state.gam * g
     env.gamhs = gam_hs = [user_state.gam * hsi for hsi in hs[:len(user_state.attributes) + 1]]
 
     ## Extract the proof
@@ -270,7 +205,7 @@ def BL_user_prove_cred(user_state):
     if __debug__:
         assert zk.verify_proof(env.get(), sig, strict=False)
 
-    return sig
+    return sig, gam_hs, gam_g
 
 @asyncio.coroutine
 def client():
@@ -286,68 +221,94 @@ def client():
         print(type(msg.encode("utf8")))
 
     def sendBin(data, writer):
-        print("bin>" + str(data))
+        #print("bin>" + str(data))
         writer.write(data + b'fireintheboof')
         #writer.write_eof()
-        print(data + b'fireintheboof')
-        print(type(data + b'fireintheboof'))
 
     def recv(reader):
         msgback = (yield from reader.readline()).decode("utf-8").rstrip()
-        print("< " + msgback)
+        #print("< " + msgback)
         return msgback
 
     # send a line
     #send("buy", writer)
     sendBin(b'buys', writer)
     msg = yield from recv(reader)
-    if repr('id') == msg:
+    #if repr('id') == msg:
+    if True:
+        startWait = time.time()
         print("ok i go get ID")
 
         #generating, encoding, and sending parameters to both sp and idp
         params = BL_setup()
-        print(params)
-        encParams = []
-        for x in params:
-            encParams.append(encode(x))
 
-        seriParams = pickle.dumps(encParams)#serialising
+        G, q, g, h, z, hs = params
 
-        sendBin(b'para' + seriParams, writer)
-        sendBin(b'para' + seriParams, writer2)
+        endWait = time.time()
+
+        sendBin(b'para' + encode(params), writer)
+        sendBin(b'para' + encode(params), writer2)
+
+
+        print('Time to generate params: ', endWait-startWait)
 
         seri_enc_idp_pub = yield from reader2.readuntil(separator=b'fireinthepub')
         if seri_enc_idp_pub[0:4] == b'mypb':
 
-            enc_idp_pub = pickle.loads(seri_enc_idp_pub[4:-12])
-            list_enc_idp_pub = []
-            for x in enc_idp_pub:
-                list_enc_idp_pub.append(decode(x))
 
-            idp_pub = tuple(list_enc_idp_pub)
+
+            #idp_pub = tuple(list_enc_idp_pub)
+            idp_pub = decode(seri_enc_idp_pub[4:-12])
+            sendBin(b'ipub' + encode(idp_pub) + b'fireintheboof', writer)
+
+        #h = Hmac(b'sha256', b'ServiceProviderID')
+
+        L2 = q.random()
+        Age = 21
+
+        #new
+        #N = params[0].hash_to_point('service_name')
+        #pseudonym = x * N
 
         #encode and send user_commit to idp
-        LT_user_state, user_commit = BL_user_setup(params, [10, 20])
-        print(user_commit)
+        LT_user_state, user_commit = BL_user_setup(params, [L2, Age])
 
-        encUserCommit = []
+        startTimeProof = time.time()
 
-        for x in user_commit:
-            encUserCommit.append(encode(x))
+        C = LT_user_state.C
+        R = LT_user_state.R
+        q = LT_user_state.params[1]
+        H = params[0].hash_to_point(b'service_name')
+        ID = L2 * H
 
-        seriUserCommit = pickle.dumps(encUserCommit)
+        wR_id = q.random()
+        wx_id = q.random()
 
-        sendBin(b'ucmt' + seriUserCommit, writer2)
+        Wit = wR_id * hs[0] + wx_id * hs[1]
+        WID_id = wx_id * H
+
+        print(hs)
+
+        stuffToHash = (Wit, WID_id, C, g, h, z, hs[0], hs[1], hs[2], hs[3], H)
+        cstr = b",".join([hexlify(x.export()) for x in stuffToHash])
+        chash = sha256(cstr).digest()
+        c = Bn.from_binary(chash)
+
+        rR_id = wR_id - c * R
+        rx_id = wx_id - c * L2
+
+        endTimeProof = time.time()
+        print('Proof took: ', endTimeProof - startTimeProof)
+
+        responses = (rR_id, rx_id)
+
+        values = (user_commit, C, c, responses, L2, Age)
+
+        sendBin(b'ucmt' + encode(values), writer2)
 
         msg2 = yield from reader2.readuntil(separator=b'fireintheboof')
-        print(msg2)
-        enc_msg_to_user = pickle.loads(msg2[:-13])
-        list_msg_to_user = []
-        for x in enc_msg_to_user:
-            list_msg_to_user.append(decode(x))
 
-        msg_to_user = tuple(list_msg_to_user)
-        print(msg_to_user)
+        msg_to_user = decode(msg2[:-13])
 
         BL_user_prep(LT_user_state, msg_to_user)
 
@@ -358,49 +319,74 @@ def client():
         sendBin(b'prep', writer2)
 
         msg3 = yield from reader2.readuntil(separator=b'fireintheboof')
-        enc_msg_to_user2 = pickle.loads(msg3[:-13])
-        list_msg_to_user2 = []
-        for x in enc_msg_to_user2:
-            list_msg_to_user2.append(decode(x))
 
-        msg_to_user2 = tuple(list_msg_to_user2)
+        msg_to_user2 = decode(msg3[:-13])
 
         #generate msg to idp
         msg_to_idp = BL_user_validation(LT_user_state, idp_pub, msg_to_user2)
-        print('message to idp', type(msg_to_idp))
 
         #encode, serialise, and send msg to idp
-        enc_msg_to_idp = encode(msg_to_idp)
-        seri_enc_msg_to_idp = pickle.dumps(enc_msg_to_idp)
-        sendBin(b'msgi' + seri_enc_msg_to_idp, writer2)
+        sendBin(b'msgi' + encode(msg_to_idp), writer2)
 
         #receive last message from idp, generate signature
 
         msg4 = yield from reader2.readuntil(separator=b'fireintheboof')
-        enc_msg_to_user3 = pickle.loads(msg4[:-13])
-        list_msg_to_user3 = []
-        for x in enc_msg_to_user3:
-            list_msg_to_user3.append(decode(x))
 
-        msg_to_user3 = tuple(list_msg_to_user3)
+        msg_to_user3 = decode(msg4[:-13])
 
         sig = BL_user_validation_2(LT_user_state, msg_to_user3)
 
-        enc_sig = []
-        for x in sig:
-            enc_sig.append(encode(x))
 
-        seri_enc_sig = pickle.dumps(enc_sig)
-        sendBin(b'vsig' + seri_enc_sig + b'fireintheboof', writer)
+        sendBin(b'vsig' + encode(sig) + b'fireintheboof', writer)
 
-        signature = BL_user_prove_cred(LT_user_state)
+        print('idppub: ', idp_pub)
 
-        enc_signature = []
-        for x in signature:
-            enc_signature.append(encode(x))
+        signature_gamhs = BL_user_prove_cred(LT_user_state)
+        signature = signature_gamhs[0]
+        gam_hs = signature_gamhs[1]
+        gam_g = signature_gamhs[2]
 
-        seri_enc_signature = pickle.dumps(enc_signature)
-        sendBin(b'vsg2' + seri_enc_signature + b'fireintheboof', writer)
+
+        sendBin(b'vsg2' + encode(signature) + b'fireintheboof', writer)
+
+        zet1p = LT_user_state.zet1 - Age * gam_hs[2]
+        newStuff = (gam_hs, Age)
+
+        #prove age
+
+        #get variabels
+        rnd = LT_user_state.rnd
+        R = LT_user_state.R
+        q = LT_user_state.params[1]
+
+
+        wrnd = q.random()
+        wR = q.random()
+        wx = q.random()
+
+        Wzet1p = wrnd * gam_g + wR * gam_hs[0] + wx * gam_hs[1] #remember to get gam_g
+
+        WID = wx * params[0].hash_to_point(b'service_name')
+
+        stuffToHash = (gam_g, Wzet1p, WID, zet1p, gam_hs[0], gam_hs[1], gam_hs[2], H)
+        cstr = b",".join([hexlify(x.export()) for x in stuffToHash])
+        chash = sha256(cstr).digest()
+        c = Bn.from_binary(chash)
+
+        rrnd = wrnd - c*rnd
+        rR = wR - c*R
+        rx = wx - c*L2
+
+        responses = (rrnd, rR, rx)
+        newStuff = (c, responses, gam_g, gam_hs, Age, L2)
+
+        """Wprime = rrnd * gam_g + rR * gam_hs[0] + rx * gam_hs[1] + c * zet1p
+
+        print(Wzet1p)
+        print(Wprime)"""
+
+
+        sendBin(b'page' + encode(newStuff) + b'fireintheboof', writer)
 
         #Close the connections to get rid of IncompleteReadError
 

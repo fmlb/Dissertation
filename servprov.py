@@ -21,7 +21,11 @@ from genzkp import *
 
 from base64 import b64encode
 
+import matplotlib.pyplot as plt
+
 C = EcGroup().generator()
+
+timeList = []
 
 
 
@@ -38,86 +42,105 @@ class MyServer:
         self.clients[task] = (client_reader, client_writer)
 
         def client_done(task):
-            print("client task done:", task, file=sys.stderr)
+            #print("client task done:", task, file=sys.stderr)
             del self.clients[task]
 
         task.add_done_callback(client_done)
 
     @asyncio.coroutine
     def _handle_client(self, client_reader, client_writer):
-        global C #This is not good
-        global idp_pub #This isnt good either
+        global count
+        global paramsReceived
+        IOtime = 0
         while True:
             try:#data = (yield from client_reader.readline()).decode("utf-8")
-                data = yield from client_reader.readuntil(separator = b'fireintheboof')
-                """print("this is the data")
-                print(data[4:-13])"""
+                startWait = time.time()
+                data = yield from client_reader.readuntil(separator=b'fireintheboof')
+                endWait = time.time()
+                #print('IO wait: ', data[0:4], endWait - startWait)
+                IOtime += endWait-startWait
+
                 cmd = data[0:4]
+
                 strippedData = data[4:-13]
+
             except asyncio.streams.IncompleteReadError:
                 data = None
             if not data: # an empty string means the client disconnected
                 break
             #cmd, *args = str(data).rstrip().split(' ')
             if cmd == b'buys':
+
                 retval = "id"
                 client_writer.write("{!r}\n".format(retval).encode("utf-8"))
                 start = time.time()
-            elif cmd == 'key':
-                key = literal_eval(args[0])
-                print(key)
-                ciphertext = literal_eval(args[1])
-                iv, ciphertext, tag = pickle.loads(ciphertext)
-                print(type(iv), iv, "\n")
-                print(type(ciphertext), ciphertext, "\n")
-                print(type(tag), tag, "\n")
-                #print(plaintext)
-            elif cmd == b'para':
-                """G = decode(literal_eval(args[0]))
-                q = decode(literal_eval(args[1]))
-                g = decode(literal_eval(args[2]))
-                h = decode(literal_eval(args[3]))
-                z = decode(literal_eval(args[4]))
-                hs = decode(literal_eval(args[5]))"""
-                listParams = []
-                encParams = pickle.loads(strippedData)
-                for x in encParams:
-                    listParams.append(decode(x))
 
-                params = tuple(listParams)
+                count +=1
+                id = count
+
+                print(id, 'Starting...')
+
+            elif cmd == b'para':
+
+                params = decode(strippedData)
+
+                paramsReceived = True
+
             elif cmd == b'ipub':
 
-                enc_idp_pub = pickle.loads(strippedData)
-                list_enc_idp_pub = []
-                for x in enc_idp_pub:
-                    list_enc_idp_pub.append(decode(x))
+                idp_pub = decode(strippedData)
 
-                idp_pub = tuple(list_enc_idp_pub)
             elif cmd == b'vsig':
-                enc_sig = pickle.loads(strippedData)
-                listSig = []
-                for x in enc_sig:
-                    listSig.append(decode(x))
 
-                sig = tuple(listSig)
+                sig = decode(strippedData)
 
             elif cmd == b'vsg2':
-                enc_signature = pickle.loads(strippedData)
-                listSignature = []
-                for x in enc_signature:
-                    listSignature.append(decode(x))
 
-                signature = tuple(listSignature)
-
+                signature = decode(strippedData)
+                startSigProof = time.time()
                 m = BL_verify_cred(params, idp_pub, 2, sig, signature)
-
-                end = time.time()
-                finalTime = end-start
+                endSigProof = time.time()
+                finalSigProof = endSigProof - startSigProof
 
                 if m != False:
-                    print('Proof Correct, time: ', finalTime)
+                    print('Signature Correct')
                 else:
-                    print('Proof Incorrect')
+                    print('Signature Incorrect')
+
+            elif cmd == b'page':
+
+                newStuff = decode(strippedData)
+                c, responses, gam_g, gam_hs, Age, xran = newStuff
+                rrnd, rR, rx = responses
+                #print(gam_hs, Age)
+
+                (G, q, g, h, z, hs) = params
+
+                startProof = time.time()
+
+                H = G.hash_to_point(b'service_name')
+                ID = xran * H
+
+                zet1 = sig[2]
+
+                zet1p = zet1 - Age * gam_hs[2]
+
+                Waprime = rrnd * gam_g + rR * gam_hs[0] + rx * gam_hs[1] + c * zet1p
+
+                Wxprime = rx * H + c * ID
+
+                stuffToHash = (gam_g, Waprime, Wxprime, zet1p, gam_hs[0], gam_hs[1], gam_hs[2], H)
+                cstr = b",".join([hexlify(x.export()) for x in stuffToHash])
+                chash = sha256(cstr).digest()
+                c_prime = Bn.from_binary(chash)
+
+                if c == c_prime:
+                    end = time.time()
+                    finalTime = end-start
+                    timeList.append(finalTime)
+                    print(id, "Age & User match, time: ", finalTime, 'Time for proof: ', end - startProof, 'Sig proof: ', finalSigProof, 'IO time: ', IOtime)
+                else:
+                    print("whops")
 
 
             elif cmd == 'Commitment':
@@ -261,7 +284,50 @@ def BL_verify_cred(params, issuer_pub, num_attributes, signature, sig):
 
     return m
 
+def BL_verify_age(params, issuer_pub, num_attributes, signature, sig, gam_hs, zet1p, gam_g):
+    m = BL_check_signature(params, issuer_pub, signature)
+    assert m != False
+
+    (G, q, g, h, z, hs) = params
+    (m, zet, zet1, zet2, om, omp, ro, ro1p, ro2p, mu) = signature
+
+    zk = BL_show_zk_proof(params, num_attributes) #we get this from the user
+
+    env = ZKEnv(zk)
+
+    # Constants
+    env.g = g
+    env.z = z
+    env.zet = zet
+    env.zet1 = zet1p
+    env.hs = gam_hs[:num_attributes + 1]
+
+    ## Extract the proof
+    res = zk.verify_proof(env.get(), sig)
+    assert res
+
+    lhs = (om + omp) % q
+    rhs_h = [zet, zet1,
+             ro * g + om * y,
+             ro1p * g + omp * zet1,
+             ro2p * h + omp * zet2,  ## problem
+             mu * z + omp * zet]
+
+    Hstr = list(map(EcPt.export, rhs_h)) + [m]
+    Hhex = b"|".join(map(b64encode, Hstr))
+    rhs = Bn.from_binary(sha256(Hhex).digest()) % q
+
+    # Check the (future) ZK proof
+    # assert rnd * gam_g + R * gam_hs[0] + L1 * gam_hs[1] + L2 * gam_hs[2] == zet1
+    assert rnd * gam_g + R * gam_hs[0] + L1 * gam_hs[1] == zet1 - Age * gam_hs[2]
+
+    return m
+
 def main():
+    global paramsReceived
+    global count
+    paramsReceived = False
+    count = 0
     loop = asyncio.get_event_loop()
     future = asyncio.Future()
 
@@ -273,6 +339,9 @@ def main():
         server.stop(loop)
     finally:
         loop.close()
+        plt.plot(timeList)
+        plt.ylabel('numbers')
+        plt.savefig('409.png')
 
 
 if __name__ == '__main__':
